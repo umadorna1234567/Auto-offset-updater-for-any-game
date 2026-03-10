@@ -7,8 +7,9 @@ ________________________________________________________________________________
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
 WHAT TO KNOW BEFORE STARTING 
 
-OFFSETS  1. if your using it just for offsets use the dumper of your choosing it should work depending if the offset names are the same in both code and dump
-SIGNATURES/PATTERNS 2. If your finding sigs dump the game with ida pro then click File → Produce file → Create LST file and that is what you will parse through
+OFFSETS              1. if your using it just for offsets use the dumper of your choosing it should work depending if the offset names are the same in both code and dump
+
+SIGNATURES/PATTERNS  2. If your finding sigs dump the game with ida pro then click File → Produce file → Create LST file and that is what you will parse through
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
 
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
