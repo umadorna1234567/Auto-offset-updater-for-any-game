@@ -24,6 +24,6 @@ if you want to auto update all the offsets in 1 file go to the offset updater ta
 ----MULTI OFFSET AUTO UPDATE WITH A DUMP OF THE GAME (2 or more files)
 if you want to auto update all the offsets in multiple files at once go to the offset updater tab and toggle on file mode and click select files to update and go to the folder and hold ctrl and click or drag over the files for offsets or patterns (signatures ect) in them then input the directory or browse for your game dump folder then click find new offsets 
 
-----MUTI OFFSET AUTO UPDATE WITHOUT DUMP
+----OFFSET AUTO UPDATE WITHOUT DUMP
 the same steps as the previous ones just instead of putting in the folder directory or browsing for a folder with a game dump you click the Use DumpSpace API toggle and instead of finding the offsets in a dump on your pc it will find them from https://dumpspace.spuckwaffel.com and then type in the games name into the game name box at the top (make sure you spell it right capitol letters dont matter) then click find new offsets and note how long ago the dump was updated after you click find new offsets it will show up above the updated offsets output box
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
