@@ -27,3 +27,13 @@ if you want to auto update all the offsets in multiple files at once go to the o
 ----OFFSET AUTO UPDATE WITHOUT DUMP
 the same steps as the previous ones just instead of putting in the folder directory or browsing for a folder with a game dump you click the Use DumpSpace API toggle and instead of finding the offsets in a dump on your pc it will find them from https://dumpspace.spuckwaffel.com and then type in the games name into the game name box at the top (make sure you spell it right capitol letters dont matter) then click find new offsets and note how long ago the dump was updated after you click find new offsets it will show up above the updated offsets output box
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
+______________________________________________________________________________________________________________________________________________________________________________________________________________________________
+AFTER ITS DONE
+offsets/patterns will be red yellow or green meaning
+
+GREEN-found the new offset and updated it
+
+YELLOW-found the new offset but it was the same value as old offset
+
+RED-didnt find offset (name of the offset in code is diffrent than in dump more than likly)
+______________________________________________________________________________________________________________________________________________________________________________________________________________________________
