@@ -1,10 +1,12 @@
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
 YAP
+
 the app.py is just for source code or if you want to change it but you can run it from it tho but i added an .exe so its just a double click 
 also this is just for offsets not sigs im working on sigs now and multi file support this readme includes sig stuff as well if i havent updated it yet disregard those parts
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
 WHAT TO KNOW BEFORE STARTING 
+
 OFFSETS  1. if your using it just for offsets use the dumper of your choosing it should work depending if the offset names are the same in both code and dump
 SIGNATURES/PATTERNS 2. If your finding sigs dump the game with ida pro then click File → Produce file → Create LST file and that is what you will parse through
 ________________________________________________________________________________________________________________________________________________________________________________________________________________________________
