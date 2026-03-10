@@ -36,5 +36,5 @@ GREEN-found the new offset and updated it
 
 YELLOW-found the new offset but it was the same value as old offset
 
-RED-didnt find offset (name of the offset in code is diffrent than in dump more than likly)
+RED-didnt find offset (name of the offset in code is diffrent than in dump more than likely)
 ______________________________________________________________________________________________________________________________________________________________________________________________________________________________
