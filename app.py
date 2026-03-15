@@ -26,6 +26,8 @@ class OffsetEntry:
     name: str
     old_value: str
     line_index: int
+    entry_type: str = "offset"
+    source_file: str = ""
 
 
 @dataclass
@@ -69,8 +71,13 @@ class FileSearchApp(tk.Tk):
         self.offset_source_label_var = tk.StringVar(value="Folder with NEW offsets")
         self.use_dumpspace_api_var = tk.BooleanVar(value=False)
         self.offset_name_case_sensitive_var = tk.BooleanVar(value=False)
+        self.offset_file_mode_var = tk.BooleanVar(value=False)
+        self.offset_files_summary_var = tk.StringVar(value="No files selected for copy-update mode.")
+        desktop_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+        self.offset_output_folder_var = tk.StringVar(value=os.path.join(desktop_dir, "OffsetUpdaterOutput"))
         self.offset_dump_age_var = tk.StringVar(value="")
         self.offset_status_var = tk.StringVar(value="Paste offsets, pick a folder, then click Find New Offsets.")
+        self.offset_selected_files: list[str] = []
 
     def _build_ui(self) -> None:
         container = ttk.Frame(self, padding=12)
@@ -216,6 +223,15 @@ class FileSearchApp(tk.Tk):
         self.offset_case_check.pack(side=tk.LEFT, padx=(8, 0))
         self.offset_controls.append(self.offset_case_check)
 
+        self.offset_file_mode_check = ttk.Checkbutton(
+            action_frame,
+            text="File mode (copy updated files)",
+            variable=self.offset_file_mode_var,
+            command=self.on_offset_file_mode_changed,
+        )
+        self.offset_file_mode_check.pack(side=tk.LEFT, padx=(8, 0))
+        self.offset_controls.append(self.offset_file_mode_check)
+
         self.offset_copy_btn = ttk.Button(
             action_frame,
             text="Copy Updated Offsets",
@@ -229,7 +245,50 @@ class FileSearchApp(tk.Tk):
             text="Paste old offsets on the left. Example: dwEntityList = 0x24AB1B8",
         ).pack(side=tk.LEFT, padx=(12, 0))
 
+        self.file_mode_frame = ttk.Frame(parent)
+        self.file_mode_frame.pack(fill=tk.X, pady=(0, 6))
+
+        self.select_files_btn = ttk.Button(
+            self.file_mode_frame,
+            text="Select files to update",
+            command=self.pick_offset_target_files,
+        )
+        self.select_files_btn.pack(side=tk.LEFT)
+        self.offset_controls.append(self.select_files_btn)
+
+        self.clear_files_btn = ttk.Button(
+            self.file_mode_frame,
+            text="Clear",
+            command=self.clear_offset_target_files,
+        )
+        self.clear_files_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.offset_controls.append(self.clear_files_btn)
+
+        self.file_mode_summary_label = ttk.Label(
+            self.file_mode_frame,
+            textvariable=self.offset_files_summary_var,
+            anchor=tk.W,
+        )
+        self.file_mode_summary_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 0))
+
+        self.file_output_frame = ttk.Frame(parent)
+        self.file_output_frame.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(self.file_output_frame, text="Output folder").pack(side=tk.LEFT)
+        self.output_folder_entry = ttk.Entry(self.file_output_frame, textvariable=self.offset_output_folder_var)
+        self.output_folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
+        self.offset_controls.append(self.output_folder_entry)
+
+        self.output_folder_browse_btn = ttk.Button(
+            self.file_output_frame,
+            text="Browse",
+            command=self.pick_offset_output_folder,
+        )
+        self.output_folder_browse_btn.pack(side=tk.LEFT)
+        self.offset_controls.append(self.output_folder_browse_btn)
+
         top_split = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
+        self.offset_top_split = top_split
         top_split.pack(fill=tk.BOTH, expand=True)
 
         input_frame = ttk.LabelFrame(top_split, text="Old Offsets Input")
@@ -247,6 +306,9 @@ class FileSearchApp(tk.Tk):
         self.offset_output_text.tag_configure("changed", foreground="#0A7A16", background="#E7F7EA")
         self.offset_output_text.tag_configure("same", foreground="#8A6D00", background="#FFF7D6")
         self.offset_output_text.tag_configure("not_found", foreground="#B00020", background="#FDE7EA")
+
+        self.offset_progress = ttk.Progressbar(parent, orient=tk.HORIZONTAL, mode="determinate")
+        self.offset_progress.pack(fill=tk.X, pady=(8, 0))
 
         result_frame = ttk.LabelFrame(parent, text="Per-Offset Results")
         result_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
@@ -275,6 +337,7 @@ class FileSearchApp(tk.Tk):
         )
         self.offset_input_text.insert("1.0", starter)
         self.on_offset_mode_changed()
+        self.on_offset_file_mode_changed()
 
     def pick_folder(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.folder_var.get() or os.path.expanduser("~"))
@@ -287,6 +350,50 @@ class FileSearchApp(tk.Tk):
         selected = filedialog.askdirectory(initialdir=start_dir)
         if selected:
             self.offset_folder_var.set(selected)
+
+    def pick_offset_target_files(self) -> None:
+        initial_dir = os.path.expanduser("~")
+        if self.offset_selected_files:
+            first_dir = os.path.dirname(self.offset_selected_files[0])
+            if os.path.isdir(first_dir):
+                initial_dir = first_dir
+        selected = filedialog.askopenfilenames(
+            initialdir=initial_dir,
+            title="Select files to create updated copies from",
+            filetypes=[
+                ("Code/Text files", "*.cpp *.h *.hpp *.c *.cs *.lua *.txt *.json *.ini *.cfg *.xml *.js *.ts"),
+                ("All files", "*.*"),
+            ],
+        )
+        if selected:
+            self.offset_selected_files = [str(path) for path in selected]
+            self.refresh_offset_files_summary()
+            if self.offset_file_mode_var.get():
+                self.populate_offset_input_from_selected_files()
+
+    def clear_offset_target_files(self) -> None:
+        self.offset_selected_files = []
+        self.refresh_offset_files_summary()
+        if self.offset_file_mode_var.get():
+            self.offset_input_text.delete("1.0", tk.END)
+
+    def pick_offset_output_folder(self) -> None:
+        current = self.offset_output_folder_var.get().strip()
+        start_dir = current if os.path.isdir(current) else os.path.join(os.path.expanduser("~"), "Desktop")
+        selected = filedialog.askdirectory(initialdir=start_dir)
+        if selected:
+            self.offset_output_folder_var.set(selected)
+
+    def refresh_offset_files_summary(self) -> None:
+        count = len(self.offset_selected_files)
+        if count == 0:
+            self.offset_files_summary_var.set("No files selected for copy-update mode.")
+            return
+        preview = os.path.basename(self.offset_selected_files[0])
+        if count == 1:
+            self.offset_files_summary_var.set(f"1 file selected: {preview}")
+        else:
+            self.offset_files_summary_var.set(f"{count} files selected. First: {preview}")
 
     def on_offset_mode_changed(self) -> None:
         use_api = self.use_dumpspace_api_var.get()
@@ -304,6 +411,42 @@ class FileSearchApp(tk.Tk):
                 self.offset_browse_btn.pack(side=tk.LEFT)
             if not self.offset_folder_var.get().strip():
                 self.offset_folder_var.set(os.path.expanduser("~"))
+
+    def on_offset_file_mode_changed(self) -> None:
+        if self.offset_file_mode_var.get():
+            if not self.file_mode_frame.winfo_manager():
+                self.file_mode_frame.pack(fill=tk.X, pady=(0, 6), before=self.offset_top_split)
+            if not self.file_output_frame.winfo_manager():
+                self.file_output_frame.pack(fill=tk.X, pady=(0, 8), before=self.offset_top_split)
+            if self.offset_selected_files:
+                self.populate_offset_input_from_selected_files()
+        else:
+            if self.file_mode_frame.winfo_manager():
+                self.file_mode_frame.pack_forget()
+            if self.file_output_frame.winfo_manager():
+                self.file_output_frame.pack_forget()
+
+    def populate_offset_input_from_selected_files(self) -> None:
+        if not self.offset_selected_files:
+            return
+        blocks: list[str] = []
+        for file_path in self.offset_selected_files:
+            abs_path = os.path.abspath(file_path)
+            blocks.append(f"### FILE: {abs_path} ###")
+            blocks.append(f"// {os.path.basename(abs_path)}")
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError as ex:
+                blocks.append(f"// Could not read file: {ex}")
+                blocks.append("")
+                continue
+            blocks.append(content.rstrip("\n"))
+            blocks.append("")
+
+        text = "\n".join(blocks).rstrip() + "\n"
+        self.offset_input_text.delete("1.0", tk.END)
+        self.offset_input_text.insert("1.0", text)
 
     def set_search_controls_enabled(self, enabled: bool) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
@@ -416,6 +559,9 @@ class FileSearchApp(tk.Tk):
         source_input = self.offset_folder_var.get().strip()
         use_api = self.use_dumpspace_api_var.get()
         name_case_sensitive = self.offset_name_case_sensitive_var.get()
+        file_mode_enabled = self.offset_file_mode_var.get()
+        target_files = list(self.offset_selected_files)
+        output_folder = self.offset_output_folder_var.get().strip()
         raw_text = self.offset_input_text.get("1.0", "end-1c")
 
         if not source_input:
@@ -430,16 +576,31 @@ class FileSearchApp(tk.Tk):
         if not raw_text.strip():
             messagebox.showwarning("Missing input", "Paste at least one offset line.")
             return
+        if file_mode_enabled and not target_files:
+            messagebox.showwarning("No files selected", "Select at least one file to create updated copies from.")
+            return
+        if file_mode_enabled and not output_folder:
+            output_folder = os.path.join(os.path.expanduser("~"), "Desktop", "OffsetUpdaterOutput")
+            self.offset_output_folder_var.set(output_folder)
+        if file_mode_enabled and target_files:
+            self.populate_offset_input_from_selected_files()
+            raw_text = self.offset_input_text.get("1.0", "end-1c")
 
         entries, lines = self.parse_offset_entries(raw_text)
+        if file_mode_enabled and target_files:
+            file_entries, file_lines = self.collect_file_mode_entries(target_files)
+            if file_entries:
+                entries = file_entries
+                lines = file_lines
+                raw_text = "\n".join(file_lines)
         if not entries:
             messagebox.showwarning(
-                "No offsets found",
-                "No valid assignment lines were found. Example: dwEntityList = 0x24AB1B8",
+                "No offsets/signatures found",
+                "No valid offsets or signatures were found in the input.",
             )
             return
 
-        unique_count = len({entry.name for entry in entries})
+        unique_count = len({self.get_entry_key(entry) for entry in entries})
         if use_api:
             self.offset_status_var.set(
                 f"Scanning... [API mode] Targets: {unique_count} | Found: 0 | Updated: 0 | Not found: {unique_count} | "
@@ -453,19 +614,36 @@ class FileSearchApp(tk.Tk):
             )
             self.offset_dump_age_var.set("")
         self.set_offset_controls_enabled(False)
+        self.set_offset_progress(0, unique_count)
         self.set_offset_output_text(raw_text)
         self.set_offset_results_text("Live results:\n")
 
         if use_api:
             thread = threading.Thread(
                 target=self._offset_api_worker,
-                args=(source_input, entries, lines, name_case_sensitive),
+                args=(
+                    source_input,
+                    entries,
+                    lines,
+                    name_case_sensitive,
+                    file_mode_enabled,
+                    target_files,
+                    output_folder,
+                ),
                 daemon=True,
             )
         else:
             thread = threading.Thread(
                 target=self._offset_worker,
-                args=(source_input, entries, lines, name_case_sensitive),
+                args=(
+                    source_input,
+                    entries,
+                    lines,
+                    name_case_sensitive,
+                    file_mode_enabled,
+                    target_files,
+                    output_folder,
+                ),
                 daemon=True,
             )
         thread.start()
@@ -486,25 +664,30 @@ class FileSearchApp(tk.Tk):
         entries: list[OffsetEntry],
         lines: list[str],
         name_case_sensitive: bool,
+        file_mode_enabled: bool,
+        target_files: list[str],
+        output_folder: str,
     ) -> None:
-        unique_names = {entry.name for entry in entries}
-        entries_by_name: dict[str, list[OffsetEntry]] = {}
+        unique_keys = {self.get_entry_key(entry) for entry in entries}
+        entries_by_key: dict[str, list[OffsetEntry]] = {}
         for entry in entries:
-            entries_by_name.setdefault(entry.name, []).append(entry)
+            entry_key = self.get_entry_key(entry)
+            entries_by_key.setdefault(entry_key, []).append(entry)
 
         patterns = {
-            name: self.build_offset_lookup_pattern(name, name_case_sensitive)
-            for name in unique_names
+            key: self.build_offset_lookup_pattern(entries_by_key[key][0].name, name_case_sensitive)
+            for key in unique_keys
+            if entries_by_key[key][0].entry_type == "offset"
         }
 
         found_map: dict[str, tuple[str, str]] = {}
-        results_by_name: dict[str, OffsetResult] = {}
+        results_by_key: dict[str, OffsetResult] = {}
         updated_lines = list(lines)
         files_scanned = 0
         binary_skipped = 0
         unreadable = 0
         updated_count = 0
-        total_targets = len(unique_names)
+        total_targets = len(unique_keys)
 
         done = False
         for root, _, files in os.walk(folder):
@@ -523,70 +706,92 @@ class FileSearchApp(tk.Tk):
                     continue
 
                 lower_text = text.lower()
-                for name in unique_names:
-                    if name in found_map:
+                for entry_key in unique_keys:
+                    if entry_key in found_map:
                         continue
-                    # Fast pre-check to avoid running regex when the symbol doesn't exist in this file.
-                    if name_case_sensitive:
-                        if name not in text:
-                            continue
-                    elif name.lower() not in lower_text:
-                        continue
-                    match = patterns[name].search(text)
-                    if match:
-                        new_value = self.normalize_offset_value(match.group(1))
-                        found_map[name] = (new_value, file_path)
 
-                        entry_group = entries_by_name.get(name, [])
-                        changed = False
-                        old_display = entry_group[0].old_value if entry_group else new_value
-                        for entry in entry_group:
-                            if new_value != entry.old_value and 0 <= entry.line_index < len(updated_lines):
-                                changed = True
+                    sample_entry = entries_by_key[entry_key][0]
+                    new_value: str | None = None
+
+                    if sample_entry.entry_type == "offset":
+                        if name_case_sensitive:
+                            if sample_entry.name not in text:
+                                continue
+                        elif sample_entry.name.lower() not in lower_text:
+                            continue
+                        match = patterns[entry_key].search(text)
+                        if match:
+                            new_value = self.normalize_offset_value(match.group(1))
+                    else:
+                        signature_value = self.find_signature_for_function(
+                            text=text,
+                            function_name=sample_entry.name,
+                            case_sensitive=name_case_sensitive,
+                        )
+                        if signature_value is not None:
+                            new_value = self.normalize_signature_value(signature_value)
+
+                    if new_value is None:
+                        continue
+
+                    found_map[entry_key] = (new_value, file_path)
+
+                    entry_group = entries_by_key.get(entry_key, [])
+                    changed = False
+                    old_display = entry_group[0].old_value if entry_group else new_value
+                    for entry in entry_group:
+                        if new_value != entry.old_value and 0 <= entry.line_index < len(updated_lines):
+                            changed = True
+                            if entry.entry_type == "signature":
+                                updated_lines[entry.line_index] = self.replace_signature_value(
+                                    updated_lines[entry.line_index],
+                                    new_value,
+                                )
+                            else:
                                 updated_lines[entry.line_index] = self.replace_offset_value(
                                     updated_lines[entry.line_index],
                                     new_value,
                                 )
 
-                        if changed:
-                            updated_count += 1
+                    if changed:
+                        updated_count += 1
 
-                        result = OffsetResult(
-                            name=name,
-                            old_value=old_display,
-                            new_value=new_value,
-                            status="Updated" if changed else "Found Same",
-                            source_file=file_path,
-                            changed=changed,
-                        )
-                        results_by_name[name] = result
+                    result = OffsetResult(
+                        name=self.format_entry_display_name(sample_entry),
+                        old_value=old_display,
+                        new_value=new_value,
+                        status="Updated" if changed else "Found Same",
+                        source_file=file_path,
+                        changed=changed,
+                    )
+                    results_by_key[entry_key] = result
 
-                        self.after(
-                            0,
-                            lambda r=result, rf=folder: self.append_offset_result(r, rf),
-                        )
-                        self.after(
-                            0,
-                            lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned: self.update_offset_status_progress(
-                                total_targets=t,
-                                found_count=f,
-                                updated_count=u,
-                                files_scanned=s,
-                                done=False,
-                            ),
-                        )
-                        status_snapshot = dict(results_by_name)
-                        lines_snapshot = list(updated_lines)
-                        entries_snapshot = list(entries)
-                        self.after(
-                            0,
-                            lambda ls=lines_snapshot, es=entries_snapshot, rs=status_snapshot: self.render_offset_output(
-                                ls,
-                                es,
-                                rs,
-                                mark_not_found=False,
-                            ),
-                        )
+                    self.after(
+                        0,
+                        lambda r=result, rf=folder: self.append_offset_result(r, rf),
+                    )
+                    self.after(
+                        0,
+                        lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned: self.update_offset_status_progress(
+                            total_targets=t,
+                            found_count=f,
+                            updated_count=u,
+                            files_scanned=s,
+                            done=False,
+                        ),
+                    )
+                    status_snapshot = dict(results_by_key)
+                    lines_snapshot = list(updated_lines)
+                    entries_snapshot = list(entries)
+                    self.after(
+                        0,
+                        lambda ls=lines_snapshot, es=entries_snapshot, rs=status_snapshot: self.render_offset_output(
+                            ls,
+                            es,
+                            rs,
+                            mark_not_found=False,
+                        ),
+                    )
 
                 if files_scanned % 200 == 0:
                     self.after(
@@ -600,34 +805,36 @@ class FileSearchApp(tk.Tk):
                         ),
                     )
 
-                if len(found_map) == len(unique_names):
+                if len(found_map) == len(unique_keys):
                     done = True
                     break
             if done:
                 break
 
-        for name in sorted(unique_names):
-            if name in results_by_name:
+        for entry_key in sorted(unique_keys):
+            if entry_key in results_by_key:
                 continue
-            first_entry = entries_by_name[name][0]
+            first_entry = entries_by_key[entry_key][0]
             not_found_result = OffsetResult(
-                name=name,
+                name=self.format_entry_display_name(first_entry),
                 old_value=first_entry.old_value,
                 new_value=first_entry.old_value,
                 status="Not Found",
                 source_file="",
                 changed=False,
             )
-            results_by_name[name] = not_found_result
+            results_by_key[entry_key] = not_found_result
             self.after(0, lambda r=not_found_result, rf=folder: self.append_offset_result(r, rf))
 
         results: list[OffsetResult] = []
         for entry in entries:
-            base_result = results_by_name.get(entry.name)
+            entry_key = self.get_entry_key(entry)
+            base_result = results_by_key.get(entry_key)
+            display_name = self.format_entry_display_name(entry)
             if base_result is None:
                 results.append(
                     OffsetResult(
-                        name=entry.name,
+                        name=display_name,
                         old_value=entry.old_value,
                         new_value=entry.old_value,
                         status="Not Found",
@@ -640,7 +847,7 @@ class FileSearchApp(tk.Tk):
             changed = base_result.new_value != entry.old_value if base_result.status != "Not Found" else False
             results.append(
                 OffsetResult(
-                    name=entry.name,
+                    name=display_name,
                     old_value=entry.old_value,
                     new_value=base_result.new_value if base_result.status != "Not Found" else entry.old_value,
                     status="Updated" if changed else base_result.status,
@@ -649,7 +856,7 @@ class FileSearchApp(tk.Tk):
                 )
             )
 
-        final_results_by_name = dict(results_by_name)
+        final_results_by_key = dict(results_by_key)
         final_lines = list(updated_lines)
         final_entries = list(entries)
         self.after(
@@ -659,10 +866,14 @@ class FileSearchApp(tk.Tk):
                 results,
                 final_lines,
                 final_entries,
-                final_results_by_name,
+                final_results_by_key,
                 files_scanned,
                 len(found_map),
                 updated_count,
+                file_mode_enabled=file_mode_enabled,
+                target_files=target_files,
+                output_folder=output_folder,
+                name_case_sensitive=name_case_sensitive,
             ),
         )
 
@@ -672,6 +883,9 @@ class FileSearchApp(tk.Tk):
         entries: list[OffsetEntry],
         lines: list[str],
         name_case_sensitive: bool,
+        file_mode_enabled: bool,
+        target_files: list[str],
+        output_folder: str,
     ) -> None:
         try:
             matched_game_name, matched_hash, api_offsets, latest_update_ms = self.fetch_dumpspace_offsets(game_name)
@@ -682,7 +896,12 @@ class FileSearchApp(tk.Tk):
         dump_age_text = self.format_dumpspace_last_updated_text(latest_update_ms)
         self.after(0, lambda t=dump_age_text: self.offset_dump_age_var.set(t))
 
-        unique_names = {entry.name for entry in entries}
+        unique_keys = {self.get_entry_key(entry) for entry in entries}
+        entries_by_key: dict[str, list[OffsetEntry]] = {}
+        for entry in entries:
+            entry_key = self.get_entry_key(entry)
+            entries_by_key.setdefault(entry_key, []).append(entry)
+
         api_offsets_exact: dict[str, str] = {}
         api_offsets_casefold: dict[str, str] = {}
         api_offsets_normalized: dict[str, str] = {}
@@ -696,30 +915,30 @@ class FileSearchApp(tk.Tk):
             if normalized_key and normalized_key not in api_offsets_normalized:
                 api_offsets_normalized[normalized_key] = value
 
-        entries_by_name: dict[str, list[OffsetEntry]] = {}
-        for entry in entries:
-            entries_by_name.setdefault(entry.name, []).append(entry)
-
-        results_by_name: dict[str, OffsetResult] = {}
+        results_by_key: dict[str, OffsetResult] = {}
         updated_lines = list(lines)
         found_count = 0
         updated_count = 0
-        total_targets = len(unique_names)
+        total_targets = len(unique_keys)
         api_source = f"Dumpspace ({matched_game_name}, hash {matched_hash})"
 
-        for name in unique_names:
+        for entry_key in unique_keys:
+            sample_entry = entries_by_key[entry_key][0]
+            if sample_entry.entry_type == "signature":
+                continue
+
             if name_case_sensitive:
-                raw_new_value = api_offsets_exact.get(name)
+                raw_new_value = api_offsets_exact.get(sample_entry.name)
             else:
-                raw_new_value = api_offsets_casefold.get(name.lower())
+                raw_new_value = api_offsets_casefold.get(sample_entry.name.lower())
                 if raw_new_value is None:
-                    raw_new_value = api_offsets_normalized.get(self.normalize_symbol_lookup_name(name))
+                    raw_new_value = api_offsets_normalized.get(self.normalize_symbol_lookup_name(sample_entry.name))
             if raw_new_value is None:
                 continue
 
             new_value = self.normalize_offset_value(raw_new_value)
             found_count += 1
-            entry_group = entries_by_name.get(name, [])
+            entry_group = entries_by_key.get(entry_key, [])
             changed = False
             old_display = entry_group[0].old_value if entry_group else new_value
             for entry in entry_group:
@@ -734,14 +953,14 @@ class FileSearchApp(tk.Tk):
                 updated_count += 1
 
             result = OffsetResult(
-                name=name,
+                name=self.format_entry_display_name(sample_entry),
                 old_value=old_display,
                 new_value=new_value,
                 status="Updated" if changed else "Found Same",
                 source_file=api_source,
                 changed=changed,
             )
-            results_by_name[name] = result
+            results_by_key[entry_key] = result
 
             self.after(0, lambda r=result: self.append_offset_result(r, ""))
             self.after(
@@ -755,7 +974,7 @@ class FileSearchApp(tk.Tk):
                     mode_detail=f"API mode ({md})",
                 ),
             )
-            status_snapshot = dict(results_by_name)
+            status_snapshot = dict(results_by_key)
             lines_snapshot = list(updated_lines)
             entries_snapshot = list(entries)
             self.after(
@@ -768,28 +987,30 @@ class FileSearchApp(tk.Tk):
                 ),
             )
 
-        for name in sorted(unique_names):
-            if name in results_by_name:
+        for entry_key in sorted(unique_keys):
+            if entry_key in results_by_key:
                 continue
-            first_entry = entries_by_name[name][0]
+            first_entry = entries_by_key[entry_key][0]
             not_found_result = OffsetResult(
-                name=name,
+                name=self.format_entry_display_name(first_entry),
                 old_value=first_entry.old_value,
                 new_value=first_entry.old_value,
                 status="Not Found",
                 source_file=api_source,
                 changed=False,
             )
-            results_by_name[name] = not_found_result
+            results_by_key[entry_key] = not_found_result
             self.after(0, lambda r=not_found_result: self.append_offset_result(r, ""))
 
         results: list[OffsetResult] = []
         for entry in entries:
-            base_result = results_by_name.get(entry.name)
+            entry_key = self.get_entry_key(entry)
+            base_result = results_by_key.get(entry_key)
+            display_name = self.format_entry_display_name(entry)
             if base_result is None:
                 results.append(
                     OffsetResult(
-                        name=entry.name,
+                        name=display_name,
                         old_value=entry.old_value,
                         new_value=entry.old_value,
                         status="Not Found",
@@ -802,7 +1023,7 @@ class FileSearchApp(tk.Tk):
             changed = base_result.new_value != entry.old_value if base_result.status != "Not Found" else False
             results.append(
                 OffsetResult(
-                    name=entry.name,
+                    name=display_name,
                     old_value=entry.old_value,
                     new_value=base_result.new_value if base_result.status != "Not Found" else entry.old_value,
                     status="Updated" if changed else base_result.status,
@@ -811,7 +1032,7 @@ class FileSearchApp(tk.Tk):
                 )
             )
 
-        final_results_by_name = dict(results_by_name)
+        final_results_by_key = dict(results_by_key)
         final_lines = list(updated_lines)
         final_entries = list(entries)
         self.after(
@@ -821,11 +1042,15 @@ class FileSearchApp(tk.Tk):
                 results,
                 final_lines,
                 final_entries,
-                final_results_by_name,
+                final_results_by_key,
                 files_scanned=0,
                 found_count=found_count,
                 updated_count=updated_count,
                 mode_detail=f"API mode ({md})",
+                file_mode_enabled=file_mode_enabled,
+                target_files=target_files,
+                output_folder=output_folder,
+                name_case_sensitive=name_case_sensitive,
             ),
         )
 
@@ -1103,26 +1328,187 @@ class FileSearchApp(tk.Tk):
             return value
         return f"0x{parsed:X}"
 
-    def parse_offset_entries(self, raw_text: str) -> tuple[list[OffsetEntry], list[str]]:
+    @staticmethod
+    def normalize_signature_value(value: str) -> str:
+        compact = " ".join(value.strip().split())
+        return compact.upper()
+
+    @staticmethod
+    def get_entry_key(entry: OffsetEntry) -> str:
+        return f"{entry.entry_type}|{entry.name}"
+
+    @staticmethod
+    def format_entry_display_name(entry: OffsetEntry) -> str:
+        if entry.entry_type == "signature":
+            return f"signature:{entry.name}"
+        return entry.name
+
+    @staticmethod
+    def parse_function_name_from_line(line: str) -> str | None:
+        if "{" not in line:
+            return None
+        if ";" in line:
+            return None
+        match = re.search(r"\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*[^;{}]*\{", line)
+        if not match:
+            return None
+        name = match.group(1)
+        if name in {"if", "for", "while", "switch", "catch"}:
+            return None
+        return name
+
+    @staticmethod
+    def looks_like_signature(value: str) -> bool:
+        return bool(re.fullmatch(r"(?:[0-9A-F?]{1,2}\s+){2,}[0-9A-F?]{1,2}", value))
+
+    def parse_signature_value_from_text(self, text: str, case_sensitive: bool = False) -> str | None:
+        scan_present = "scan" in text if case_sensitive else "scan" in text.lower()
+        if not scan_present:
+            return None
+        for quoted in re.finditer(r'(?P<q>["\'])(?P<val>[^"\']+)(?P=q)', text):
+            normalized = self.normalize_signature_value(quoted.group("val"))
+            if self.looks_like_signature(normalized):
+                return normalized
+        return None
+
+    def parse_signature_value_from_line(self, line: str) -> str | None:
+        return self.parse_signature_value_from_text(line, case_sensitive=False)
+
+    def find_signature_for_function(
+        self,
+        text: str,
+        function_name: str,
+        case_sensitive: bool,
+    ) -> str | None:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        function_pattern = re.compile(
+            rf"\b{re.escape(function_name)}\s*\([^;{{}}]*\)[^;{{}}]*\{{",
+            flags,
+        )
+
+        for match in function_pattern.finditer(text):
+            brace_pos = match.end() - 1
+            body = self.extract_braced_block(text, brace_pos, max_len=120000)
+            if body is None:
+                continue
+            signature = self.parse_signature_value_from_text(body, case_sensitive=case_sensitive)
+            if signature:
+                return signature
+
+        if function_name.startswith("signature_line_"):
+            return self.parse_signature_value_from_text(text, case_sensitive=case_sensitive)
+        return None
+
+    @staticmethod
+    def extract_braced_block(text: str, open_brace_index: int, max_len: int = 120000) -> str | None:
+        brace_end = FileSearchApp.find_matching_brace_end(text, open_brace_index, max_len=max_len)
+        if brace_end is None:
+            return None
+        return text[open_brace_index : brace_end + 1]
+
+    @staticmethod
+    def find_matching_brace_end(text: str, open_brace_index: int, max_len: int = 120000) -> int | None:
+        if open_brace_index < 0 or open_brace_index >= len(text) or text[open_brace_index] != "{":
+            return None
+        depth = 0
+        end_limit = min(len(text), open_brace_index + max_len)
+        for i in range(open_brace_index, end_limit):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return i
+        return None
+
+    def parse_offset_entries(
+        self,
+        raw_text: str,
+        default_source_file: str | None = None,
+        allow_file_markers: bool = True,
+    ) -> tuple[list[OffsetEntry], list[str]]:
         lines = raw_text.splitlines()
         entries: list[OffsetEntry] = []
+        current_function_name: str | None = None
+        current_source_file = ""
 
         for idx, line in enumerate(lines):
-            match = re.search(
+            if allow_file_markers and not default_source_file:
+                file_marker = re.match(r"^\s*#{3}\s*FILE:\s*(?P<path>.+?)\s*#{3}\s*$", line)
+                if file_marker:
+                    current_source_file = os.path.abspath(file_marker.group("path").strip())
+                    current_function_name = None
+                    continue
+
+            if default_source_file:
+                current_source_file = os.path.abspath(default_source_file)
+
+            function_match = self.parse_function_name_from_line(line)
+            if function_match:
+                current_function_name = function_match
+
+            offset_match = re.search(
                 r'(?P<name>"[A-Za-z_][\w:.]*"|\'[A-Za-z_][\w:.]*\'|[A-Za-z_][\w:.]*)\s*[:=]\s*(?P<q>["\']?)(?P<value>0[xX][0-9A-Fa-f]+|\d+)(?P=q)',
                 line,
             )
-            if not match:
+            if offset_match:
+                entries.append(
+                    OffsetEntry(
+                        name=offset_match.group("name").strip("\"'"),
+                        old_value=self.normalize_offset_value(offset_match.group("value")),
+                        line_index=idx,
+                        entry_type="offset",
+                        source_file=current_source_file,
+                    )
+                )
                 continue
 
-            entries.append(
-                OffsetEntry(
-                    name=match.group("name").strip("\"'"),
-                    old_value=self.normalize_offset_value(match.group("value")),
-                    line_index=idx,
+            signature_match = self.parse_signature_value_from_line(line)
+            if signature_match:
+                signature_name = current_function_name or f"signature_line_{idx + 1}"
+                entries.append(
+                    OffsetEntry(
+                        name=signature_name,
+                        old_value=self.normalize_signature_value(signature_match),
+                        line_index=idx,
+                        entry_type="signature",
+                        source_file=current_source_file,
+                    )
                 )
-            )
 
+        return entries, lines
+
+    def collect_file_mode_entries(self, target_files: list[str]) -> tuple[list[OffsetEntry], list[str]]:
+        entries: list[OffsetEntry] = []
+        lines: list[str] = []
+        for file_path in target_files:
+            abs_file_path = os.path.abspath(file_path)
+            file_name = os.path.basename(abs_file_path)
+            try:
+                with open(abs_file_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError as ex:
+                lines.append(f"{file_name}: could not read ({ex})")
+                continue
+
+            file_entries, _ = self.parse_offset_entries(
+                content,
+                default_source_file=abs_file_path,
+                allow_file_markers=False,
+            )
+            entries.extend(file_entries)
+            if file_entries:
+                limit = min(200, len(file_entries))
+                for entry in file_entries[:limit]:
+                    lines.append(f"{file_name}: {entry.name} = {entry.old_value}")
+                if len(file_entries) > limit:
+                    lines.append(f"{file_name}: ... {len(file_entries) - limit} more entries omitted")
+            else:
+                lines.append(f"{file_name}: no offsets detected")
+
+        if not entries:
+            lines.append("No offsets found in the selected files.")
         return entries, lines
 
     def finish_offset_update(
@@ -1131,14 +1517,17 @@ class FileSearchApp(tk.Tk):
         results: list[OffsetResult],
         updated_lines: list[str],
         entries: list[OffsetEntry],
-        results_by_name: dict[str, OffsetResult],
+        results_by_key: dict[str, OffsetResult],
         files_scanned: int,
         found_count: int,
         updated_count: int,
         mode_detail: str | None = None,
+        file_mode_enabled: bool = False,
+        target_files: list[str] | None = None,
+        output_folder: str = "",
+        name_case_sensitive: bool = False,
     ) -> None:
         total_targets = len({result.name for result in results})
-        self.render_offset_output(updated_lines, entries, results_by_name, mark_not_found=True)
         self.update_offset_status_progress(
             total_targets=total_targets,
             found_count=found_count,
@@ -1147,7 +1536,270 @@ class FileSearchApp(tk.Tk):
             done=True,
             mode_detail=mode_detail,
         )
+        if file_mode_enabled:
+            export_summary, file_stats = self.export_updated_file_copies(
+                target_files=target_files or [],
+                output_folder=output_folder,
+                entries=entries,
+                results_by_key=results_by_key,
+                name_case_sensitive=name_case_sensitive,
+            )
+            self.render_file_mode_output(file_stats)
+            self.offset_results_text.configure(state=tk.NORMAL)
+            self.offset_results_text.insert(tk.END, f"\n{export_summary}\n")
+            self.offset_results_text.see(tk.END)
+            self.offset_results_text.configure(state=tk.DISABLED)
+            self.offset_status_var.set(f"{self.offset_status_var.get()} | {export_summary}")
+        else:
+            self.render_offset_output(updated_lines, entries, results_by_key, mark_not_found=True)
         self.set_offset_controls_enabled(True)
+
+    def export_updated_file_copies(
+        self,
+        target_files: list[str],
+        output_folder: str,
+        entries: list[OffsetEntry],
+        results_by_key: dict[str, OffsetResult],
+        name_case_sensitive: bool,
+    ) -> tuple[str, list[dict[str, object]]]:
+        if not target_files:
+            return "File mode: no files selected.", []
+        if not output_folder:
+            output_folder = os.path.join(os.path.expanduser("~"), "Desktop", "OffsetUpdaterOutput")
+
+        try:
+            os.makedirs(output_folder, exist_ok=True)
+        except OSError as ex:
+            return f"File mode failed: could not create output folder '{output_folder}' ({ex}).", []
+
+        common_root = self.get_common_parent_directory(target_files)
+        written = 0
+        changed = 0
+        unchanged = 0
+        errors = 0
+        file_stats: list[dict[str, object]] = []
+
+        for file_path in target_files:
+            abs_file_path = os.path.abspath(file_path)
+            stats = {
+                "file_path": abs_file_path,
+                "display_path": self.make_relative_path(abs_file_path, common_root),
+                "updated": 0,
+                "same": 0,
+                "not_found": 0,
+                "error": "",
+            }
+            try:
+                with open(abs_file_path, "r", encoding="utf-8", errors="replace") as f:
+                    original_text = f.read()
+            except OSError as ex:
+                stats["error"] = str(ex)
+                errors += 1
+                file_stats.append(stats)
+                continue
+
+            updated_text = original_text
+            file_changed = False
+
+            per_file_entries: list[OffsetEntry] = []
+            file_norm = os.path.normcase(abs_file_path)
+            for entry in entries:
+                if not entry.source_file:
+                    continue
+                entry_norm = os.path.normcase(os.path.abspath(entry.source_file))
+                if entry_norm != file_norm:
+                    continue
+                per_file_entries.append(entry)
+
+            for entry in per_file_entries:
+                key = self.get_entry_key(entry)
+                base_result = results_by_key.get(key)
+                if base_result is None or base_result.status == "Not Found":
+                    stats["not_found"] = int(stats["not_found"]) + 1
+                    continue
+                new_value = base_result.new_value
+                if entry.entry_type == "offset":
+                    updated_text, state = self.apply_offset_update_to_text(
+                        updated_text,
+                        entry.name,
+                        new_value,
+                        name_case_sensitive,
+                    )
+                else:
+                    updated_text, state = self.apply_signature_update_to_text(
+                        updated_text,
+                        entry.name,
+                        new_value,
+                        name_case_sensitive,
+                    )
+                stats[state] = int(stats[state]) + 1
+                if state == "updated":
+                    file_changed = True
+
+            rel_path = self.make_relative_path(abs_file_path, common_root)
+            out_path = os.path.join(output_folder, rel_path)
+            out_dir = os.path.dirname(out_path)
+            try:
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                with open(out_path, "w", encoding="utf-8", newline="") as f:
+                    f.write(updated_text)
+            except OSError as ex:
+                stats["error"] = str(ex)
+                errors += 1
+                file_stats.append(stats)
+                continue
+
+            written += 1
+            if file_changed:
+                changed += 1
+            else:
+                unchanged += 1
+            file_stats.append(stats)
+
+        return (
+            f"File mode output: wrote {written} file(s) to {output_folder} | "
+            f"changed: {changed}, unchanged: {unchanged}, errors: {errors}",
+            file_stats,
+        )
+
+    def render_file_mode_output(self, file_stats: list[dict[str, object]]) -> None:
+        self.offset_output_text.configure(state=tk.NORMAL)
+        self.offset_output_text.delete("1.0", tk.END)
+        if not file_stats:
+            self.offset_output_text.insert(tk.END, "No file mode results.\n")
+            self.offset_output_text.configure(state=tk.DISABLED)
+            return
+
+        for stats in file_stats:
+            display = str(stats.get("display_path", stats.get("file_path", "")))
+            self.offset_output_text.insert(tk.END, f"{display} | ")
+            counts = [
+                ("updated", "changed"),
+                ("same", "same"),
+                ("not_found", "not_found"),
+            ]
+
+            for idx, (key, tag) in enumerate(counts):
+                if idx:
+                    self.offset_output_text.insert(tk.END, "/")
+                self.offset_output_text.insert(
+                    tk.END,
+                    str(stats.get(key, 0)),
+                    tag,
+                )
+            error_text = str(stats.get("error", "")).strip()
+            if error_text:
+                self.offset_output_text.insert(tk.END, f" | Error: {error_text}", "not_found")
+            self.offset_output_text.insert(tk.END, "\n")
+        self.offset_output_text.configure(state=tk.DISABLED)
+
+    @staticmethod
+    def get_common_parent_directory(paths: list[str]) -> str:
+        if not paths:
+            return os.path.expanduser("~")
+        normalized = [os.path.abspath(path) for path in paths]
+        try:
+            common_path = os.path.commonpath(normalized)
+        except ValueError:
+            return os.path.dirname(normalized[0])
+        if os.path.isfile(common_path):
+            return os.path.dirname(common_path)
+        return common_path
+
+    def apply_offset_update_to_text(
+        self,
+        text: str,
+        name: str,
+        new_value: str,
+        case_sensitive: bool,
+    ) -> tuple[str, str]:
+        pattern = self.build_offset_replace_pattern(name, case_sensitive)
+        saw_match = False
+        saw_change = False
+
+        def replace_match(match: re.Match[str]) -> str:
+            nonlocal saw_match, saw_change
+            saw_match = True
+            old_value = self.normalize_offset_value(match.group("value"))
+            if old_value == new_value:
+                return match.group(0)
+            saw_change = True
+            quote = match.group("quote")
+            return f"{match.group('prefix')}{quote}{new_value}{quote}"
+
+        updated = pattern.sub(replace_match, text)
+        if saw_change:
+            return updated, "updated"
+        if saw_match:
+            return updated, "same"
+        return updated, "not_found"
+
+    def apply_signature_update_to_text(
+        self,
+        text: str,
+        function_name: str,
+        new_signature: str,
+        case_sensitive: bool,
+    ) -> tuple[str, str]:
+        if not function_name:
+            return text, "not_found"
+        if function_name.startswith("signature_line_"):
+            return self.replace_first_signature_literal(text, new_signature, case_sensitive)
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        function_pattern = re.compile(
+            rf"\b{re.escape(function_name)}\s*\([^;{{}}]*\)[^;{{}}]*\{{",
+            flags,
+        )
+        cursor = 0
+        updated_text = text
+        status = "not_found"
+
+        while True:
+            match = function_pattern.search(updated_text, cursor)
+            if match is None:
+                break
+
+            brace_start = match.end() - 1
+            brace_end = self.find_matching_brace_end(updated_text, brace_start, max_len=120000)
+            if brace_end is None:
+                cursor = match.end()
+                continue
+
+            body = updated_text[brace_start : brace_end + 1]
+            new_body, body_status = self.replace_first_signature_literal(body, new_signature, case_sensitive)
+            if body_status == "updated":
+                updated_text = updated_text[:brace_start] + new_body + updated_text[brace_end + 1 :]
+                status = "updated"
+                break
+            else:
+                if body_status == "same" and status != "updated":
+                    status = "same"
+                cursor = brace_end + 1
+
+        return updated_text, status
+
+    def replace_first_signature_literal(
+        self,
+        text: str,
+        new_signature: str,
+        case_sensitive: bool,
+    ) -> tuple[str, str]:
+        scan_present = "scan" in text if case_sensitive else "scan" in text.lower()
+        if not scan_present:
+            return text, "not_found"
+
+        for quoted in re.finditer(r'(?P<q>["\'])(?P<val>[^"\']+)(?P=q)', text):
+            old_signature = self.normalize_signature_value(quoted.group("val"))
+            if not self.looks_like_signature(old_signature):
+                continue
+            if old_signature == new_signature:
+                return text, "same"
+            start = quoted.start("val")
+            end = quoted.end("val")
+            return text[:start] + new_signature + text[end:], "updated"
+        return text, "not_found"
 
     def set_offset_output_text(self, text: str) -> None:
         self.offset_output_text.configure(state=tk.NORMAL)
@@ -1204,18 +1856,27 @@ class FileSearchApp(tk.Tk):
             f"{prefix} Targets: {total_targets} | Found: {found_count} | Updated: {updated_count} | "
             f"Found Same: {found_same_count} | Not Found: {not_found_count} | Files scanned: {files_scanned}"
         )
+        self.set_offset_progress(found_count, total_targets)
+
+    def set_offset_progress(self, found_count: int, total_targets: int) -> None:
+        if total_targets <= 0:
+            self.offset_progress["maximum"] = 1
+            self.offset_progress["value"] = 0
+            return
+        self.offset_progress["maximum"] = total_targets
+        self.offset_progress["value"] = min(found_count, total_targets)
 
     def render_offset_output(
         self,
         lines: list[str],
         entries: list[OffsetEntry],
-        results_by_name: dict[str, OffsetResult],
+        results_by_key: dict[str, OffsetResult],
         mark_not_found: bool,
     ) -> None:
         line_tags: dict[int, str] = {}
 
         for entry in entries:
-            result = results_by_name.get(entry.name)
+            result = results_by_key.get(self.get_entry_key(entry))
             if result is None:
                 if not mark_not_found:
                     continue
@@ -1256,6 +1917,16 @@ class FileSearchApp(tk.Tk):
         )
 
     @staticmethod
+    def build_offset_replace_pattern(name: str, case_sensitive: bool) -> re.Pattern[str]:
+        escaped = re.escape(name)
+        key_pattern = rf"(?:\"{escaped}\"|'{escaped}'|\b{escaped}\b)"
+        flags = 0 if case_sensitive else re.IGNORECASE
+        return re.compile(
+            rf"(?P<prefix>{key_pattern}\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>0[xX][0-9A-Fa-f]+|\d+)(?P=quote)",
+            flags,
+        )
+
+    @staticmethod
     def replace_offset_value(line: str, new_value: str) -> str:
         return re.sub(
             r'([:=]\s*)(["\']?)(0[xX][0-9A-Fa-f]+|\d+)(\2)',
@@ -1263,6 +1934,16 @@ class FileSearchApp(tk.Tk):
             line,
             count=1,
         )
+
+    @staticmethod
+    def replace_signature_value(line: str, new_signature: str) -> str:
+        for quoted in re.finditer(r'(?P<q>["\'])(?P<val>[^"\']+)(?P=q)', line):
+            normalized = FileSearchApp.normalize_signature_value(quoted.group("val"))
+            if FileSearchApp.looks_like_signature(normalized):
+                start = quoted.start("val")
+                end = quoted.end("val")
+                return line[:start] + new_signature + line[end:]
+        return line
 
     @staticmethod
     def make_relative_path(file_path: str, root_folder: str) -> str:
