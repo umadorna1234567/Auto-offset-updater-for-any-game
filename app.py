@@ -7,6 +7,8 @@ import threading
 import time
 import tkinter as tk
 import urllib.request
+import urllib.error
+import sys
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -52,6 +54,7 @@ class FileSearchApp(tk.Tk):
 
         self._init_search_state()
         self._init_offset_state()
+        self._init_pattern_state()
 
         self.results: list[MatchResult] = []
         self.tree_item_to_index: dict[str, int] = {}
@@ -79,6 +82,20 @@ class FileSearchApp(tk.Tk):
         self.offset_status_var = tk.StringVar(value="Paste offsets, pick a folder, then click Find New Offsets.")
         self.offset_selected_files: list[str] = []
 
+    def _init_pattern_state(self) -> None:
+        app_dir = self.get_app_directory()
+        self.pattern_bridge_url_var = tk.StringVar(value="http://127.0.0.1:8765")
+        self.pattern_name_case_sensitive_var = tk.BooleanVar(value=False)
+        self.pattern_status_var = tk.StringVar(
+            value="Click Connect IDA, then paste old patterns and click Find New Patterns."
+        )
+        self.pattern_bridge_status_var = tk.StringVar(
+            value="IDA bridge: not connected"
+        )
+        self.pattern_selected_script_var = tk.StringVar(
+            value=os.path.abspath(os.path.join(app_dir, "ida_pattern_bridge.py"))
+        )
+
     def _build_ui(self) -> None:
         container = ttk.Frame(self, padding=12)
         container.pack(fill=tk.BOTH, expand=True)
@@ -88,12 +105,15 @@ class FileSearchApp(tk.Tk):
 
         self.search_tab = ttk.Frame(notebook)
         self.offset_tab = ttk.Frame(notebook)
+        self.pattern_tab = ttk.Frame(notebook)
 
         notebook.add(self.search_tab, text="File Search")
         notebook.add(self.offset_tab, text="Offset Updater")
+        notebook.add(self.pattern_tab, text="Pattern Updater")
 
         self._build_search_tab(self.search_tab)
         self._build_offset_tab(self.offset_tab)
+        self._build_pattern_tab(self.pattern_tab)
 
     def _build_search_tab(self, parent: ttk.Frame) -> None:
         self.search_controls: list[tk.Widget] = []
@@ -339,6 +359,107 @@ class FileSearchApp(tk.Tk):
         self.on_offset_mode_changed()
         self.on_offset_file_mode_changed()
 
+    def _build_pattern_tab(self, parent: ttk.Frame) -> None:
+        self.pattern_controls: list[tk.Widget] = []
+
+        bridge_frame = ttk.Frame(parent)
+        bridge_frame.pack(fill=tk.X)
+
+        self.pattern_connect_btn = ttk.Button(
+            bridge_frame,
+            text="Connect IDA",
+            command=self.connect_pattern_bridge,
+        )
+        self.pattern_connect_btn.pack(side=tk.LEFT)
+        self.pattern_controls.append(self.pattern_connect_btn)
+
+        bridge_status = ttk.Label(parent, textvariable=self.pattern_bridge_status_var, anchor=tk.W)
+        bridge_status.pack(fill=tk.X, pady=(6, 0))
+
+        helper_frame = ttk.Frame(parent)
+        helper_frame.pack(fill=tk.X, pady=(6, 8))
+        ttk.Label(
+            helper_frame,
+            text="Connect IDA checks the live bridge. If IDA is not connected yet, the app copies the bridge script path and tells you the single action to run inside IDA.",
+        ).pack(side=tk.LEFT)
+
+        action_frame = ttk.Frame(parent)
+        action_frame.pack(fill=tk.X, pady=(0, 8))
+
+        self.pattern_update_btn = ttk.Button(
+            action_frame,
+            text="Find New Patterns",
+            command=self.start_pattern_update,
+        )
+        self.pattern_update_btn.pack(side=tk.LEFT)
+        self.pattern_controls.append(self.pattern_update_btn)
+
+        self.pattern_case_check = ttk.Checkbutton(
+            action_frame,
+            text="Case sensitive names",
+            variable=self.pattern_name_case_sensitive_var,
+        )
+        self.pattern_case_check.pack(side=tk.LEFT, padx=(8, 0))
+        self.pattern_controls.append(self.pattern_case_check)
+
+        self.pattern_copy_btn = ttk.Button(
+            action_frame,
+            text="Copy Updated Patterns",
+            command=self.copy_updated_patterns,
+        )
+        self.pattern_copy_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.pattern_controls.append(self.pattern_copy_btn)
+
+        ttk.Label(
+            action_frame,
+            text='Paste old patterns on the left. Example: g_opcodes->scan(..., "48 89 5C 24 ?")',
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
+        top_split = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
+        top_split.pack(fill=tk.BOTH, expand=True)
+
+        input_frame = ttk.LabelFrame(top_split, text="Old Patterns Input")
+        output_frame = ttk.LabelFrame(top_split, text="Updated Patterns Output")
+        top_split.add(input_frame, weight=1)
+        top_split.add(output_frame, weight=1)
+
+        self.pattern_input_text = ScrolledText(input_frame, wrap=tk.NONE, height=14, font=("Consolas", 10))
+        self.pattern_input_text.pack(fill=tk.BOTH, expand=True)
+
+        self.pattern_output_text = ScrolledText(output_frame, wrap=tk.NONE, height=14, font=("Consolas", 10), state=tk.DISABLED)
+        self.pattern_output_text.pack(fill=tk.BOTH, expand=True)
+        self.pattern_output_text.tag_configure("changed", foreground="#0A7A16", background="#E7F7EA")
+        self.pattern_output_text.tag_configure("same", foreground="#8A6D00", background="#FFF7D6")
+        self.pattern_output_text.tag_configure("not_found", foreground="#B00020", background="#FDE7EA")
+
+        self.pattern_progress = ttk.Progressbar(parent, orient=tk.HORIZONTAL, mode="determinate")
+        self.pattern_progress.pack(fill=tk.X, pady=(8, 0))
+
+        result_frame = ttk.LabelFrame(parent, text="Per-Pattern Results")
+        result_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        self.pattern_results_text = ScrolledText(result_frame, wrap=tk.WORD, height=10, font=("Consolas", 10), state=tk.DISABLED)
+        self.pattern_results_text.pack(fill=tk.BOTH, expand=True)
+        self.pattern_results_text.tag_configure("changed", foreground="#0A7A16", background="#E7F7EA")
+        self.pattern_results_text.tag_configure("same", foreground="#8A6D00", background="#FFF7D6")
+        self.pattern_results_text.tag_configure("not_found", foreground="#B00020", background="#FDE7EA")
+
+        legend_frame = ttk.Frame(parent)
+        legend_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(legend_frame, text="Color key:").pack(side=tk.LEFT)
+        tk.Label(legend_frame, text=" Green = updated pattern found and changed ", fg="#0A7A16").pack(side=tk.LEFT, padx=(8, 6))
+        tk.Label(legend_frame, text=" Yellow = found but same pattern ", fg="#B8860B").pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(legend_frame, text=" Red = not found ", fg="#B00020").pack(side=tk.LEFT)
+
+        status = ttk.Label(parent, textvariable=self.pattern_status_var, anchor=tk.W)
+        status.pack(fill=tk.X, pady=(8, 0))
+
+        starter = (
+            'static auto fn = reinterpret_cast<void(__fastcall*)(void*, int, unsigned int)>(g_opcodes->scan(g_modules->m_modules.client_dll.get_name(), "85 D2 0F 88 ? ? ? ? 55 56 57"));\n'
+            'static GetBonePosition_t fn = reinterpret_cast<GetBonePosition_t>(g_opcodes->scan(g_modules->m_modules.client_dll.get_name(), "48 89 6C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 41 56 48 83 EC ? 4D 8B F1 49 8B E8"));'
+        )
+        self.pattern_input_text.insert("1.0", starter)
+
     def pick_folder(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.folder_var.get() or os.path.expanduser("~"))
         if selected:
@@ -458,6 +579,12 @@ class FileSearchApp(tk.Tk):
         for widget in self.offset_controls:
             widget.configure(state=state)
         self.offset_input_text.configure(state=state)
+
+    def set_pattern_controls_enabled(self, enabled: bool) -> None:
+        state = tk.NORMAL if enabled else tk.DISABLED
+        for widget in self.pattern_controls:
+            widget.configure(state=state)
+        self.pattern_input_text.configure(state=state)
 
     def start_search(self) -> None:
         folder = self.folder_var.get().strip()
@@ -595,8 +722,8 @@ class FileSearchApp(tk.Tk):
                 raw_text = "\n".join(file_lines)
         if not entries:
             messagebox.showwarning(
-                "No offsets/signatures found",
-                "No valid offsets or signatures were found in the input.",
+                "No offsets found",
+                "No valid offsets were found in the input.",
             )
             return
 
@@ -658,6 +785,426 @@ class FileSearchApp(tk.Tk):
         self.update_idletasks()
         self.offset_status_var.set("Copied updated offsets to clipboard.")
 
+    def copy_updated_patterns(self) -> None:
+        text = self.pattern_output_text.get("1.0", "end-1c")
+        if not text.strip():
+            messagebox.showwarning("Nothing to copy", "No updated pattern text is available yet.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.update_idletasks()
+        self.pattern_status_var.set("Copied updated patterns to clipboard.")
+
+    def copy_pattern_script_path(self) -> None:
+        script_path = self.ensure_bridge_script_available()
+        if not script_path:
+            messagebox.showwarning("Missing script path", "The IDA bridge script could not be prepared.")
+            return
+        self.pattern_selected_script_var.set(script_path)
+        self.clipboard_clear()
+        self.clipboard_append(script_path)
+        self.update_idletasks()
+        self.pattern_bridge_status_var.set(f"IDA bridge script path copied: {script_path}")
+
+    def connect_pattern_bridge(self) -> None:
+        bridge_url = self.pattern_bridge_url_var.get().strip()
+        if not bridge_url:
+            messagebox.showwarning("Missing bridge URL", "Enter the IDA bridge URL first.")
+            return
+        self.pattern_bridge_status_var.set("IDA bridge: connecting...")
+        thread = threading.Thread(
+            target=self._pattern_bridge_connect_worker,
+            args=(bridge_url,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _pattern_bridge_connect_worker(self, bridge_url: str) -> None:
+        try:
+            payload = self.call_pattern_bridge(bridge_url, "/health", None)
+        except Exception as ex:
+            self.after(0, lambda e=str(ex): self.handle_pattern_bridge_offline(e))
+            return
+
+        ida_file = str(payload.get("input_file", "")).strip()
+        version = str(payload.get("version", "")).strip()
+        if ida_file:
+            status = f"IDA bridge: connected | Database: {ida_file}"
+        else:
+            status = "IDA bridge: connected"
+        if version:
+            status += f" | Version: {version}"
+        self.after(0, lambda s=status: self.pattern_bridge_status_var.set(s))
+
+    def handle_pattern_bridge_offline(self, error_message: str) -> None:
+        self.copy_pattern_script_path()
+        self.pattern_bridge_status_var.set(f"IDA bridge: offline | Script path copied | {error_message}")
+        messagebox.showinfo(
+            "Connect IDA",
+            "IDA is not connected yet.\n\n"
+            "The bridge script path was copied to your clipboard.\n\n"
+            "In IDA:\n"
+            "1. Press Alt+F7\n"
+            "2. Paste the copied path\n"
+            "3. Run the script\n"
+            "4. Click Connect IDA again",
+        )
+
+    def start_pattern_update(self) -> None:
+        bridge_url = self.pattern_bridge_url_var.get().strip()
+        name_case_sensitive = self.pattern_name_case_sensitive_var.get()
+        raw_text = self.pattern_input_text.get("1.0", "end-1c")
+
+        if not bridge_url:
+            messagebox.showwarning("Missing bridge URL", "Enter the IDA bridge URL.")
+            return
+        if not raw_text.strip():
+            messagebox.showwarning("Missing input", "Paste at least one pattern line.")
+            return
+
+        entries, lines = self.parse_pattern_entries(raw_text)
+        if not entries:
+            messagebox.showwarning("No patterns found", "No valid patterns were found in the input.")
+            return
+
+        unique_count = len({self.get_entry_key(entry) for entry in entries})
+        self.pattern_status_var.set(
+            f"Scanning... Targets: {unique_count} | Found: 0 | Updated: 0 | Found Same: 0 | Not Found: {unique_count}"
+        )
+        self.set_pattern_controls_enabled(False)
+        self.set_pattern_progress(0, unique_count)
+        self.set_pattern_output_text(raw_text)
+        self.set_pattern_results_text("Live results:\n")
+
+        thread = threading.Thread(
+            target=self._pattern_ida_worker,
+            args=(bridge_url, entries, lines, name_case_sensitive),
+            daemon=True,
+        )
+        thread.start()
+
+    def _pattern_ida_worker(
+        self,
+        bridge_url: str,
+        entries: list[OffsetEntry],
+        lines: list[str],
+        name_case_sensitive: bool,
+    ) -> None:
+        unique_keys = {self.get_entry_key(entry) for entry in entries}
+        entries_by_key: dict[str, list[OffsetEntry]] = {}
+        for entry in entries:
+            entry_key = self.get_entry_key(entry)
+            entries_by_key.setdefault(entry_key, []).append(entry)
+
+        try:
+            payload = self.call_pattern_bridge(
+                bridge_url,
+                "/update-patterns",
+                {
+                    "case_sensitive": name_case_sensitive,
+                    "entries": [
+                        {
+                            "name": entries_by_key[key][0].name,
+                            "old_value": entries_by_key[key][0].old_value,
+                        }
+                        for key in sorted(unique_keys)
+                    ],
+                },
+            )
+        except Exception as ex:
+            self.after(0, lambda e=str(ex): self.fail_pattern_update(e))
+            return
+
+        bridge_status_bits = ["IDA bridge: connected"]
+        input_file = str(payload.get("input_file", "")).strip()
+        if input_file:
+            bridge_status_bits.append(f"Database: {input_file}")
+        self.after(0, lambda s=" | ".join(bridge_status_bits): self.pattern_bridge_status_var.set(s))
+
+        result_items = payload.get("results", [])
+        result_map: dict[str, dict[str, object]] = {}
+        if isinstance(result_items, list):
+            for item in result_items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if not name:
+                    continue
+                result_map[f"signature|{name}"] = item
+
+        results_by_key: dict[str, OffsetResult] = {}
+        updated_lines = list(lines)
+        found_count = 0
+        updated_count = 0
+        total_targets = len(unique_keys)
+        source_root = input_file or bridge_url
+
+        for entry_key in sorted(unique_keys):
+            sample_entry = entries_by_key[entry_key][0]
+            item = result_map.get(entry_key)
+            if item is None:
+                result = OffsetResult(
+                    name=self.format_pattern_display_name(sample_entry),
+                    old_value=sample_entry.old_value,
+                    new_value=sample_entry.old_value,
+                    status="Not Found",
+                    source_file="",
+                    changed=False,
+                )
+                results_by_key[entry_key] = result
+                self.after(0, lambda r=result: self.append_pattern_result(r, source_root))
+                continue
+
+            new_value = self.normalize_signature_value(str(item.get("new_value", sample_entry.old_value)))
+            source = str(item.get("source", "")).strip()
+            item_status = str(item.get("status", "Not Found")).strip() or "Not Found"
+            if item_status == "Not Found":
+                result = OffsetResult(
+                    name=self.format_pattern_display_name(sample_entry),
+                    old_value=sample_entry.old_value,
+                    new_value=sample_entry.old_value,
+                    status="Not Found",
+                    source_file=source,
+                    changed=False,
+                )
+                results_by_key[entry_key] = result
+                self.after(0, lambda r=result: self.append_pattern_result(r, source_root))
+                continue
+
+            changed = False
+            for entry in entries_by_key.get(entry_key, []):
+                if new_value != entry.old_value and 0 <= entry.line_index < len(updated_lines):
+                    changed = True
+                    updated_lines[entry.line_index] = self.replace_signature_value(
+                        updated_lines[entry.line_index],
+                        new_value,
+                    )
+
+            found_count += 1
+            if changed:
+                updated_count += 1
+
+            status = "Updated" if changed else "Found Same"
+            result = OffsetResult(
+                name=self.format_pattern_display_name(sample_entry),
+                old_value=sample_entry.old_value,
+                new_value=new_value,
+                status=status,
+                source_file=source,
+                changed=changed,
+            )
+            results_by_key[entry_key] = result
+            self.after(0, lambda r=result: self.append_pattern_result(r, source_root))
+            self.after(
+                0,
+                lambda t=total_targets, f=found_count, u=updated_count: self.update_pattern_status_progress(
+                    total_targets=t,
+                    found_count=f,
+                    updated_count=u,
+                    done=False,
+                ),
+            )
+            lines_snapshot = list(updated_lines)
+            entries_snapshot = list(entries)
+            results_snapshot = dict(results_by_key)
+            self.after(
+                0,
+                lambda ls=lines_snapshot, es=entries_snapshot, rs=results_snapshot: self.render_pattern_output(
+                    ls,
+                    es,
+                    rs,
+                    mark_not_found=False,
+                ),
+            )
+
+        results: list[OffsetResult] = []
+        for entry in entries:
+            entry_key = self.get_entry_key(entry)
+            base_result = results_by_key.get(entry_key)
+            display_name = self.format_pattern_display_name(entry)
+            if base_result is None:
+                results.append(
+                    OffsetResult(
+                        name=display_name,
+                        old_value=entry.old_value,
+                        new_value=entry.old_value,
+                        status="Not Found",
+                        source_file="",
+                        changed=False,
+                    )
+                )
+                continue
+
+            changed = base_result.new_value != entry.old_value if base_result.status != "Not Found" else False
+            results.append(
+                OffsetResult(
+                    name=display_name,
+                    old_value=entry.old_value,
+                    new_value=base_result.new_value if base_result.status != "Not Found" else entry.old_value,
+                    status="Updated" if changed else base_result.status,
+                    source_file=base_result.source_file,
+                    changed=changed,
+                )
+            )
+
+        self.after(
+            0,
+            lambda rs=dict(results_by_key), rl=list(updated_lines), re=list(entries): self.finish_pattern_update(
+                results=results,
+                updated_lines=rl,
+                entries=re,
+                results_by_key=rs,
+                found_count=found_count,
+                updated_count=updated_count,
+            ),
+        )
+
+    def fail_pattern_update(self, error_message: str) -> None:
+        self.pattern_status_var.set(f"Pattern update failed: {error_message}")
+        self.set_pattern_controls_enabled(True)
+        messagebox.showerror("Pattern updater error", error_message)
+
+    def finish_pattern_update(
+        self,
+        results: list[OffsetResult],
+        updated_lines: list[str],
+        entries: list[OffsetEntry],
+        results_by_key: dict[str, OffsetResult],
+        found_count: int,
+        updated_count: int,
+    ) -> None:
+        total_targets = len({result.name for result in results})
+        self.update_pattern_status_progress(
+            total_targets=total_targets,
+            found_count=found_count,
+            updated_count=updated_count,
+            done=True,
+        )
+        self.render_pattern_output(updated_lines, entries, results_by_key, mark_not_found=True)
+        self.set_pattern_controls_enabled(True)
+
+    def set_pattern_output_text(self, text: str) -> None:
+        self.pattern_output_text.configure(state=tk.NORMAL)
+        self.pattern_output_text.delete("1.0", tk.END)
+        self.pattern_output_text.insert("1.0", text)
+        self.pattern_output_text.configure(state=tk.DISABLED)
+
+    def set_pattern_results_text(self, text: str) -> None:
+        self.pattern_results_text.configure(state=tk.NORMAL)
+        self.pattern_results_text.delete("1.0", tk.END)
+        self.pattern_results_text.insert("1.0", text)
+        self.pattern_results_text.configure(state=tk.DISABLED)
+
+    def append_pattern_result(self, result: OffsetResult, source_root: str) -> None:
+        self.pattern_results_text.configure(state=tk.NORMAL)
+        source_display = result.source_file or source_root or "-"
+        line = (
+            f"{result.name}: {result.old_value} -> {result.new_value} | "
+            f"{result.status} | Source: {source_display}\n"
+        )
+        tag = self.get_offset_result_tag(result)
+        self.pattern_results_text.insert(tk.END, line, tag)
+        self.pattern_results_text.see(tk.END)
+        self.pattern_results_text.configure(state=tk.DISABLED)
+
+    def update_pattern_status_progress(
+        self,
+        total_targets: int,
+        found_count: int,
+        updated_count: int,
+        done: bool,
+    ) -> None:
+        found_same_count = max(found_count - updated_count, 0)
+        not_found_count = max(total_targets - found_count, 0)
+        prefix = "Complete" if done else "Scanning..."
+        self.pattern_status_var.set(
+            f"{prefix} Targets: {total_targets} | Found: {found_count} | Updated: {updated_count} | "
+            f"Found Same: {found_same_count} | Not Found: {not_found_count}"
+        )
+        self.set_pattern_progress(found_count, total_targets)
+
+    def set_pattern_progress(self, found_count: int, total_targets: int) -> None:
+        if total_targets <= 0:
+            self.pattern_progress["maximum"] = 1
+            self.pattern_progress["value"] = 0
+            return
+        self.pattern_progress["maximum"] = total_targets
+        self.pattern_progress["value"] = min(found_count, total_targets)
+
+    def render_pattern_output(
+        self,
+        lines: list[str],
+        entries: list[OffsetEntry],
+        results_by_key: dict[str, OffsetResult],
+        mark_not_found: bool,
+    ) -> None:
+        line_tags: dict[int, str] = {}
+
+        for entry in entries:
+            result = results_by_key.get(self.get_entry_key(entry))
+            if result is None:
+                if not mark_not_found:
+                    continue
+                tag = "not_found"
+            else:
+                tag = self.get_offset_result_tag(result)
+            current = line_tags.get(entry.line_index)
+            line_tags[entry.line_index] = self.pick_stronger_tag(current, tag)
+
+        self.pattern_output_text.configure(state=tk.NORMAL)
+        self.pattern_output_text.delete("1.0", tk.END)
+        for idx, line in enumerate(lines):
+            tag = line_tags.get(idx)
+            if tag:
+                self.pattern_output_text.insert(tk.END, f"{line}\n", tag)
+            else:
+                self.pattern_output_text.insert(tk.END, f"{line}\n")
+        self.pattern_output_text.configure(state=tk.DISABLED)
+
+    def call_pattern_bridge(self, bridge_url: str, path: str, payload: dict | None) -> dict[str, object]:
+        url = bridge_url.rstrip("/") + path
+        data = None
+        headers = {"Content-Type": "application/json"}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.URLError as ex:
+            raise RuntimeError(f"Could not reach IDA bridge at {bridge_url}: {ex}") from ex
+        except Exception as ex:
+            raise RuntimeError(f"IDA bridge request failed: {ex}") from ex
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as ex:
+            raise RuntimeError(f"IDA bridge returned invalid JSON: {ex}") from ex
+        if not isinstance(parsed, dict):
+            raise RuntimeError("IDA bridge returned an invalid payload.")
+        if parsed.get("ok") is False:
+            raise RuntimeError(str(parsed.get("error", "IDA bridge returned an error.")))
+        return parsed
+
+    def ensure_bridge_script_available(self) -> str:
+        target_path = os.path.abspath(os.path.join(self.get_app_directory(), "ida_pattern_bridge.py"))
+        self.pattern_selected_script_var.set(target_path)
+        if os.path.isfile(target_path):
+            return target_path
+
+        source_path = self.get_bundled_resource_path("ida_pattern_bridge.py")
+        if not source_path or not os.path.isfile(source_path):
+            return ""
+
+        try:
+            with open(source_path, "r", encoding="utf-8") as src:
+                script_text = src.read()
+            with open(target_path, "w", encoding="utf-8", newline="\n") as dst:
+                dst.write(script_text)
+        except OSError:
+            return ""
+        return target_path
+
     def _offset_worker(
         self,
         folder: str,
@@ -689,126 +1236,191 @@ class FileSearchApp(tk.Tk):
         updated_count = 0
         total_targets = len(unique_keys)
 
-        done = False
-        for root, _, files in os.walk(folder):
-            for file_name in files:
-                file_path = os.path.join(root, file_name)
-                files_scanned += 1
+        scan_files = self.list_offset_scan_files(folder)
+        total_scan_bytes = sum(file_size for _, file_size in scan_files)
+        processed_scan_bytes = 0
+        total_scan_files = len(scan_files)
 
-                try:
-                    if self.is_probably_binary(file_path):
-                        binary_skipped += 1
-                        continue
-                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                        text = f.read()
-                except (OSError, UnicodeError):
-                    unreadable += 1
+        done = False
+        for file_index, (file_path, file_size) in enumerate(scan_files, start=1):
+            files_scanned += 1
+
+            try:
+                if self.is_probably_binary(file_path):
+                    binary_skipped += 1
+                    self.after(
+                        0,
+                        lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned, p=processed_scan_bytes + file_size, ts=total_scan_bytes, cf=file_path, cfi=file_index, tf=total_scan_files: self.update_offset_status_progress(
+                            total_targets=t,
+                            found_count=f,
+                            updated_count=u,
+                            files_scanned=s,
+                            done=False,
+                            scan_processed=p,
+                            scan_total=ts,
+                            current_file=cf,
+                            current_file_index=cfi,
+                            total_files=tf,
+                            stage_name="reading",
+                            stage_progress=1.0,
+                        ),
+                    )
+                    processed_scan_bytes += file_size
                     continue
 
-                lower_text = text.lower()
-                for entry_key in unique_keys:
-                    if entry_key in found_map:
-                        continue
+                text = self.read_text_file_with_progress(
+                    file_path=file_path,
+                    base_processed=processed_scan_bytes,
+                    total_scan_bytes=total_scan_bytes,
+                    total_targets=total_targets,
+                    found_count=len(found_map),
+                    updated_count=updated_count,
+                    files_scanned=files_scanned,
+                    current_file_index=file_index,
+                    total_files=total_scan_files,
+                )
+                processed_scan_bytes += file_size
+            except (OSError, UnicodeError):
+                unreadable += 1
+                self.after(
+                    0,
+                    lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned, p=processed_scan_bytes + file_size, ts=total_scan_bytes, cf=file_path, cfi=file_index, tf=total_scan_files: self.update_offset_status_progress(
+                        total_targets=t,
+                        found_count=f,
+                        updated_count=u,
+                        files_scanned=s,
+                        done=False,
+                        scan_processed=p,
+                        scan_total=ts,
+                        current_file=cf,
+                        current_file_index=cfi,
+                        total_files=tf,
+                        stage_name="reading",
+                        stage_progress=1.0,
+                    ),
+                )
+                processed_scan_bytes += file_size
+                continue
 
-                    sample_entry = entries_by_key[entry_key][0]
-                    new_value: str | None = None
+            lower_text = text.lower()
+            pending_keys = [entry_key for entry_key in unique_keys if entry_key not in found_map]
+            pending_total = len(pending_keys)
+            for pending_index, entry_key in enumerate(pending_keys, start=1):
+                if entry_key in found_map:
+                    continue
 
-                    if sample_entry.entry_type == "offset":
-                        if name_case_sensitive:
-                            if sample_entry.name not in text:
-                                continue
-                        elif sample_entry.name.lower() not in lower_text:
+                sample_entry = entries_by_key[entry_key][0]
+                new_value: str | None = None
+
+                if sample_entry.entry_type == "offset":
+                    if name_case_sensitive:
+                        if sample_entry.name not in text:
                             continue
-                        match = patterns[entry_key].search(text)
-                        if match:
-                            new_value = self.normalize_offset_value(match.group(1))
-                    else:
-                        signature_value = self.find_signature_for_function(
-                            text=text,
-                            function_name=sample_entry.name,
-                            case_sensitive=name_case_sensitive,
-                        )
-                        if signature_value is not None:
-                            new_value = self.normalize_signature_value(signature_value)
-
-                    if new_value is None:
+                    elif sample_entry.name.lower() not in lower_text:
                         continue
-
-                    found_map[entry_key] = (new_value, file_path)
-
-                    entry_group = entries_by_key.get(entry_key, [])
-                    changed = False
-                    old_display = entry_group[0].old_value if entry_group else new_value
-                    for entry in entry_group:
-                        if new_value != entry.old_value and 0 <= entry.line_index < len(updated_lines):
-                            changed = True
-                            if entry.entry_type == "signature":
-                                updated_lines[entry.line_index] = self.replace_signature_value(
-                                    updated_lines[entry.line_index],
-                                    new_value,
-                                )
-                            else:
-                                updated_lines[entry.line_index] = self.replace_offset_value(
-                                    updated_lines[entry.line_index],
-                                    new_value,
-                                )
-
-                    if changed:
-                        updated_count += 1
-
-                    result = OffsetResult(
-                        name=self.format_entry_display_name(sample_entry),
-                        old_value=old_display,
-                        new_value=new_value,
-                        status="Updated" if changed else "Found Same",
-                        source_file=file_path,
-                        changed=changed,
+                    match = patterns[entry_key].search(text)
+                    if match:
+                        new_value = self.normalize_offset_value(match.group(1))
+                else:
+                    signature_value = self.find_signature_for_function(
+                        text=text,
+                        function_name=sample_entry.name,
+                        old_signature=sample_entry.old_value,
+                        case_sensitive=name_case_sensitive,
                     )
-                    results_by_key[entry_key] = result
+                    if signature_value is not None:
+                        new_value = self.normalize_signature_value(signature_value)
 
-                    self.after(
-                        0,
-                        lambda r=result, rf=folder: self.append_offset_result(r, rf),
-                    )
-                    self.after(
-                        0,
-                        lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned: self.update_offset_status_progress(
-                            total_targets=t,
-                            found_count=f,
-                            updated_count=u,
-                            files_scanned=s,
-                            done=False,
-                        ),
-                    )
-                    status_snapshot = dict(results_by_key)
-                    lines_snapshot = list(updated_lines)
-                    entries_snapshot = list(entries)
-                    self.after(
-                        0,
-                        lambda ls=lines_snapshot, es=entries_snapshot, rs=status_snapshot: self.render_offset_output(
-                            ls,
-                            es,
-                            rs,
-                            mark_not_found=False,
-                        ),
-                    )
+                if new_value is None:
+                    continue
 
-                if files_scanned % 200 == 0:
-                    self.after(
-                        0,
-                        lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned: self.update_offset_status_progress(
-                            total_targets=t,
-                            found_count=f,
-                            updated_count=u,
-                            files_scanned=s,
-                            done=False,
-                        ),
-                    )
+                found_map[entry_key] = (new_value, file_path)
 
-                if len(found_map) == len(unique_keys):
-                    done = True
-                    break
-            if done:
+                entry_group = entries_by_key.get(entry_key, [])
+                changed = False
+                old_display = entry_group[0].old_value if entry_group else new_value
+                for entry in entry_group:
+                    if new_value != entry.old_value and 0 <= entry.line_index < len(updated_lines):
+                        changed = True
+                        if entry.entry_type == "signature":
+                            updated_lines[entry.line_index] = self.replace_signature_value(
+                                updated_lines[entry.line_index],
+                                new_value,
+                            )
+                        else:
+                            updated_lines[entry.line_index] = self.replace_offset_value(
+                                updated_lines[entry.line_index],
+                                new_value,
+                            )
+
+                if changed:
+                    updated_count += 1
+
+                result = OffsetResult(
+                    name=self.format_entry_display_name(sample_entry),
+                    old_value=old_display,
+                    new_value=new_value,
+                    status="Updated" if changed else "Found Same",
+                    source_file=file_path,
+                    changed=changed,
+                )
+                results_by_key[entry_key] = result
+
+                self.after(
+                    0,
+                    lambda r=result, rf=folder: self.append_offset_result(r, rf),
+                )
+                self.after(
+                    0,
+                    lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned, p=processed_scan_bytes, ts=total_scan_bytes, cf=file_path, cfi=file_index, tf=total_scan_files, spi=(pending_index / pending_total if pending_total else 1.0): self.update_offset_status_progress(
+                        total_targets=t,
+                        found_count=f,
+                        updated_count=u,
+                        files_scanned=s,
+                        done=False,
+                        scan_processed=p,
+                        scan_total=ts,
+                        current_file=cf,
+                        current_file_index=cfi,
+                        total_files=tf,
+                        stage_name="matching",
+                        stage_progress=spi,
+                    ),
+                )
+                status_snapshot = dict(results_by_key)
+                lines_snapshot = list(updated_lines)
+                entries_snapshot = list(entries)
+                self.after(
+                    0,
+                    lambda ls=lines_snapshot, es=entries_snapshot, rs=status_snapshot: self.render_offset_output(
+                        ls,
+                        es,
+                        rs,
+                        mark_not_found=False,
+                    ),
+                )
+
+            if files_scanned % 20 == 0 or processed_scan_bytes == total_scan_bytes:
+                self.after(
+                    0,
+                    lambda t=total_targets, f=len(found_map), u=updated_count, s=files_scanned, p=processed_scan_bytes, ts=total_scan_bytes, cf=file_path, cfi=file_index, tf=total_scan_files: self.update_offset_status_progress(
+                        total_targets=t,
+                        found_count=f,
+                        updated_count=u,
+                        files_scanned=s,
+                        done=False,
+                        scan_processed=p,
+                        scan_total=ts,
+                        current_file=cf,
+                        current_file_index=cfi,
+                        total_files=tf,
+                        stage_name="matching",
+                        stage_progress=1.0,
+                    ),
+                )
+
+            if len(found_map) == len(unique_keys):
+                done = True
                 break
 
         for entry_key in sorted(unique_keys):
@@ -1344,6 +1956,12 @@ class FileSearchApp(tk.Tk):
         return entry.name
 
     @staticmethod
+    def format_pattern_display_name(entry: OffsetEntry) -> str:
+        if entry.name.startswith("signature_line_"):
+            return entry.name
+        return entry.name
+
+    @staticmethod
     def parse_function_name_from_line(line: str) -> str | None:
         if "{" not in line:
             return None
@@ -1378,6 +1996,7 @@ class FileSearchApp(tk.Tk):
         self,
         text: str,
         function_name: str,
+        old_signature: str,
         case_sensitive: bool,
     ) -> str | None:
         flags = 0 if case_sensitive else re.IGNORECASE
@@ -1396,8 +2015,69 @@ class FileSearchApp(tk.Tk):
                 return signature
 
         if function_name.startswith("signature_line_"):
-            return self.parse_signature_value_from_text(text, case_sensitive=case_sensitive)
-        return None
+            signature = self.parse_signature_value_from_text(text, case_sensitive=case_sensitive)
+            if signature:
+                return signature
+
+        return self.find_best_matching_signature(text, old_signature)
+
+    def find_best_matching_signature(self, text: str, old_signature: str) -> str | None:
+        best_signature: str | None = None
+        best_score = -1
+        old_tokens = self.tokenize_signature(old_signature)
+        if len(old_tokens) < 4:
+            return None
+
+        for candidate in self.iter_signature_literals(text):
+            score = self.score_signature_match(old_tokens, self.tokenize_signature(candidate))
+            if score > best_score:
+                best_signature = candidate
+                best_score = score
+
+        min_run = max(6, min(len(old_tokens), 12) // 2)
+        if best_signature is None or best_score < min_run * 10:
+            return None
+        return best_signature
+
+    def iter_signature_literals(self, text: str) -> list[str]:
+        signatures: list[str] = []
+        for quoted in re.finditer(r'(?P<q>["\'])(?P<val>[^"\']+)(?P=q)', text):
+            normalized = self.normalize_signature_value(quoted.group("val"))
+            if self.looks_like_signature(normalized):
+                signatures.append(normalized)
+        return signatures
+
+    @staticmethod
+    def tokenize_signature(signature: str) -> list[str]:
+        return [token for token in signature.split() if token]
+
+    @staticmethod
+    def score_signature_match(old_tokens: list[str], candidate_tokens: list[str]) -> int:
+        limit = min(len(old_tokens), len(candidate_tokens))
+        exact_matches = 0
+        wildcard_matches = 0
+        longest_run = 0
+        current_run = 0
+
+        for idx in range(limit):
+            old_token = old_tokens[idx]
+            candidate_token = candidate_tokens[idx]
+            compatible = (
+                old_token == candidate_token
+                or old_token == "?"
+                or candidate_token == "?"
+            )
+            if compatible:
+                current_run += 1
+                longest_run = max(longest_run, current_run)
+                if old_token == candidate_token:
+                    exact_matches += 1
+                else:
+                    wildcard_matches += 1
+            else:
+                current_run = 0
+
+        return (longest_run * 10) + (exact_matches * 3) + wildcard_matches - abs(len(old_tokens) - len(candidate_tokens))
 
     @staticmethod
     def extract_braced_block(text: str, open_brace_index: int, max_len: int = 120000) -> str | None:
@@ -1444,10 +2124,6 @@ class FileSearchApp(tk.Tk):
             if default_source_file:
                 current_source_file = os.path.abspath(default_source_file)
 
-            function_match = self.parse_function_name_from_line(line)
-            if function_match:
-                current_function_name = function_match
-
             offset_match = re.search(
                 r'(?P<name>"[A-Za-z_][\w:.]*"|\'[A-Za-z_][\w:.]*\'|[A-Za-z_][\w:.]*)\s*[:=]\s*(?P<q>["\']?)(?P<value>0[xX][0-9A-Fa-f]+|\d+)(?P=q)',
                 line,
@@ -1462,7 +2138,34 @@ class FileSearchApp(tk.Tk):
                         source_file=current_source_file,
                     )
                 )
-                continue
+
+        return entries, lines
+
+    def parse_pattern_entries(
+        self,
+        raw_text: str,
+        default_source_file: str | None = None,
+        allow_file_markers: bool = True,
+    ) -> tuple[list[OffsetEntry], list[str]]:
+        lines = raw_text.splitlines()
+        entries: list[OffsetEntry] = []
+        current_function_name: str | None = None
+        current_source_file = ""
+
+        for idx, line in enumerate(lines):
+            if allow_file_markers and not default_source_file:
+                file_marker = re.match(r"^\s*#{3}\s*FILE:\s*(?P<path>.+?)\s*#{3}\s*$", line)
+                if file_marker:
+                    current_source_file = os.path.abspath(file_marker.group("path").strip())
+                    current_function_name = None
+                    continue
+
+            if default_source_file:
+                current_source_file = os.path.abspath(default_source_file)
+
+            function_match = self.parse_function_name_from_line(line)
+            if function_match:
+                current_function_name = function_match
 
             signature_match = self.parse_signature_value_from_line(line)
             if signature_match:
@@ -1846,6 +2549,13 @@ class FileSearchApp(tk.Tk):
         files_scanned: int,
         done: bool,
         mode_detail: str | None = None,
+        scan_processed: int | None = None,
+        scan_total: int | None = None,
+        current_file: str | None = None,
+        current_file_index: int | None = None,
+        total_files: int | None = None,
+        stage_name: str | None = None,
+        stage_progress: float | None = None,
     ) -> None:
         found_same_count = max(found_count - updated_count, 0)
         not_found_count = max(total_targets - found_count, 0)
@@ -1865,6 +2575,69 @@ class FileSearchApp(tk.Tk):
             return
         self.offset_progress["maximum"] = total_targets
         self.offset_progress["value"] = min(found_count, total_targets)
+
+    @staticmethod
+    def list_offset_scan_files(folder: str) -> list[tuple[str, int]]:
+        scan_files: list[tuple[str, int]] = []
+        for root, _, files in os.walk(folder):
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                try:
+                    file_size = os.path.getsize(file_path)
+                except OSError:
+                    file_size = 0
+                scan_files.append((file_path, file_size))
+        return scan_files
+
+    def read_text_file_with_progress(
+        self,
+        file_path: str,
+        base_processed: int,
+        total_scan_bytes: int,
+        total_targets: int,
+        found_count: int,
+        updated_count: int,
+        files_scanned: int,
+        current_file_index: int,
+        total_files: int,
+    ) -> str:
+        chunks: list[bytes] = []
+        bytes_read = 0
+        chunk_size = 1024 * 1024
+        next_report = 4 * 1024 * 1024
+        try:
+            file_size = max(os.path.getsize(file_path), 1)
+        except OSError:
+            file_size = 1
+
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                bytes_read += len(chunk)
+                if bytes_read >= next_report:
+                    self.after(
+                        0,
+                        lambda t=total_targets, fnd=found_count, upd=updated_count, s=files_scanned, p=base_processed + bytes_read, ts=total_scan_bytes, cf=file_path, cfi=current_file_index, tf=total_files, sp=min(bytes_read / file_size, 1.0): self.update_offset_status_progress(
+                            total_targets=t,
+                            found_count=fnd,
+                            updated_count=upd,
+                            files_scanned=s,
+                            done=False,
+                            scan_processed=p,
+                            scan_total=ts,
+                            current_file=cf,
+                            current_file_index=cfi,
+                            total_files=tf,
+                            stage_name="reading",
+                            stage_progress=sp,
+                        ),
+                    )
+                    next_report += 4 * 1024 * 1024
+
+        return b"".join(chunks).decode("utf-8", errors="replace")
 
     def render_offset_output(
         self,
@@ -1953,6 +2726,20 @@ class FileSearchApp(tk.Tk):
             return os.path.relpath(file_path, root_folder)
         except ValueError:
             return file_path
+
+    @staticmethod
+    def get_app_directory() -> str:
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(os.path.abspath(sys.executable))
+        return os.path.dirname(os.path.abspath(__file__))
+
+    @staticmethod
+    def get_bundled_resource_path(name: str) -> str:
+        if getattr(sys, "frozen", False):
+            base_dir = getattr(sys, "_MEIPASS", "")
+            if base_dir:
+                return os.path.join(base_dir, name)
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
 
     @staticmethod
     def is_probably_binary(file_path: str) -> bool:
